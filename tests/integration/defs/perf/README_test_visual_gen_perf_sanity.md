@@ -195,16 +195,22 @@ file or introduce a separate test-db file and a new Jenkins stage entry.
 
 ### Triggering CI
 
-To run only the VisualGen perf sanity stage (without the full L0 suite):
+The VisualGen perf sanity stage is a post-merge stage
+(`DGX_B200-8_GPUs-PyTorch-VisualGen-PerfSanity-Post-Merge-1`), so it does not
+run as part of the default pre-merge pipeline.
+
+To run only the VisualGen perf sanity stage (without the full L0 suite), use
+`--post-merge` together with `--stage-list`:
 
 ```
-/bot run --stage-list "DGX_B200-1_GPU-PyTorch-VisualGen-PerfSanity-1"
+/bot run --post-merge --stage-list "DGX_B200-8_GPUs-PyTorch-VisualGen-PerfSanity-Post-Merge-1"
 ```
 
-To include the VisualGen perf sanity stage alongside the standard L0 suite:
+To include the VisualGen perf sanity stage alongside the standard pre-merge
+L0 suite, use `--extra-stage`:
 
 ```
-/bot run --extra-stage "DGX_B200-1_GPU-PyTorch-VisualGen-PerfSanity-1"
+/bot run --extra-stage "DGX_B200-8_GPUs-PyTorch-VisualGen-PerfSanity-Post-Merge-1"
 ```
 
 Model assets are read from `LLM_MODELS_ROOT` (defaults to
