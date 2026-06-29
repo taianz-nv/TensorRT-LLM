@@ -71,7 +71,10 @@ xdsl>=0.59.0 # Optional: required for MLIR-based elementwise fusion in AutoDeplo
 tiktoken
 blobfile
 openai-harmony==0.0.4
-nvidia-cutlass-dsl[cu13]==4.5.0; python_version >= "3.10"
+# NVFP4 CuteDSL conv kernel (cute_dsl_kernels/blackwell/conv) needs the
+# `LaunchConfig(smem_merge_branch_allocs=...)` API added in 4.6 — 4.5.x fails to
+# compile it. 4.6.0 stable is not yet on PyPI; pin the 4.6 dev build until it is.
+nvidia-cutlass-dsl[cu13]==4.6.0.dev0; python_version >= "3.10"
 plotly
 numexpr
 partial_json_parser
