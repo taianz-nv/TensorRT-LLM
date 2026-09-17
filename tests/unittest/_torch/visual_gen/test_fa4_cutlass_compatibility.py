@@ -45,6 +45,15 @@ def test_cutlass_dsl_existing_names_are_preserved(monkeypatch):
     assert cute.make_fragment is existing_make_fragment
 
 
+def test_quack_065_removed_packed_subtraction_alias_is_restored(monkeypatch):
+    quack_activation = pytest.importorskip("quack.activation")
+    monkeypatch.delattr(quack_activation, "sub_packed_f32x2", raising=False)
+
+    _install_cutlass_dsl_compatibility()
+
+    assert quack_activation.sub_packed_f32x2 is cute.arch.sub_packed_f32x2
+
+
 def test_cutlass_dsl_47_aliases_allow_fa4_interface_import() -> None:
     _install_cutlass_dsl_compatibility()
     interface = import_module("flash_attn.cute.interface")

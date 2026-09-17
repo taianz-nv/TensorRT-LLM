@@ -29,7 +29,7 @@ from .interface import AttentionBackend, AttentionTensorLayout
 
 
 def _install_cutlass_dsl_compatibility() -> None:
-    """Restore CuTe aliases required by pinned third-party FA4 and QuACK."""
+    """Restore CuTe/QuACK aliases required by pinned third-party FA4."""
     import cutlass.cute as cute
 
     for name in ("ThrCopy", "ThrMma"):
@@ -37,6 +37,17 @@ def _install_cutlass_dsl_compatibility() -> None:
             setattr(cute.core, name, getattr(cute, name))
     if not hasattr(cute, "make_fragment") and hasattr(cute, "make_rmem_tensor"):
         cute.make_fragment = cute.make_rmem_tensor
+
+    # QuACK 0.6.5 moved its packed subtraction helper to CuTe.  FA4 4.0.0b19
+    # still references the old public QuACK name while tracing SM100 kernels.
+    # Keep the pinned, CUTLASS-4.8-compatible QuACK release and restore the
+    # removed alias until FA4 consumes the CuTe spelling directly.
+    try:
+        import quack.activation as quack_activation
+    except ImportError:
+        return
+    if not hasattr(quack_activation, "sub_packed_f32x2"):
+        quack_activation.sub_packed_f32x2 = cute.arch.sub_packed_f32x2
 
 
 def _install_flash_attn_tile_scheduler_compatibility() -> None:
