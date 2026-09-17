@@ -64,6 +64,18 @@ def test_fastwan_warmup_uses_fixed_dmd_step_count():
     assert pipe.default_warmup_steps == len(WanDMDPipeline.DMD_TIMESTEPS) == 3
 
 
+def test_fastwan_warmup_uses_cfg_free_guidance():
+    pipe = object.__new__(WanDMDPipeline)
+    with (
+        mock.patch.object(WanDMDPipeline, "_warmup_fp4_vae_encoder"),
+        mock.patch.object(WanDMDPipeline, "forward") as forward,
+    ):
+        pipe._run_warmup(height=704, width=1280, num_frames=121, steps=3)
+
+    forward.assert_called_once()
+    assert forward.call_args.kwargs["guidance_scale"] == 1.0
+
+
 _ZERO_NOISE_EXPECTED_SCALE = (1.0 - _SIGMA_1) * (1.0 - _SIGMA_2)  # ≈ 0.1162
 
 _RANDN_PATH = "tensorrt_llm._torch.visual_gen.models.wan.pipeline_fastwan.randn_tensor"

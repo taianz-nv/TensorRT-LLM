@@ -429,6 +429,9 @@ class WanPipeline(BasePipeline):
         super()._run_warmup_pass(shapes, steps)
 
     def _run_warmup(self, height: int, width: int, num_frames: int, steps: int) -> None:
+        # Use the concrete pipeline's declared default. Distilled Wan variants
+        # are CFG-free and reject the base pipeline's historical value of 5.0.
+        guidance_scale = self.default_generation_params["guidance_scale"]
         with torch.no_grad():
             self._warmup_fp4_vae_encoder(height, width)
             self.forward(
@@ -438,7 +441,7 @@ class WanPipeline(BasePipeline):
                 width=width,
                 num_frames=num_frames,
                 num_inference_steps=steps,
-                guidance_scale=5.0,
+                guidance_scale=guidance_scale,
                 seed=42,
                 max_sequence_length=512,
             )
