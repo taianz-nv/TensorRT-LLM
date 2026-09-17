@@ -57,6 +57,13 @@ _NUM_PATCHES = 3 * 2 * 2  # 12
 # So final output = (1-sigma_1)*(1-sigma_2)*initial  =  0.243*0.478*initial  ≈  0.1162
 _SIGMA_1 = WanDMDPipeline.DMD_TIMESTEPS[1] / WanDMDPipeline.NUM_TRAIN_TIMESTEPS  # 0.757
 _SIGMA_2 = WanDMDPipeline.DMD_TIMESTEPS[2] / WanDMDPipeline.NUM_TRAIN_TIMESTEPS  # 0.522
+
+
+def test_fastwan_warmup_uses_fixed_dmd_step_count():
+    pipe = object.__new__(WanDMDPipeline)
+    assert pipe.default_warmup_steps == len(WanDMDPipeline.DMD_TIMESTEPS) == 3
+
+
 _ZERO_NOISE_EXPECTED_SCALE = (1.0 - _SIGMA_1) * (1.0 - _SIGMA_2)  # ≈ 0.1162
 
 _RANDN_PATH = "tensorrt_llm._torch.visual_gen.models.wan.pipeline_fastwan.randn_tensor"
