@@ -12,6 +12,8 @@ from ..minimax_h3_nvfp4__sm_107__u1_u4 import config as shared_config
 PRESET = {
     "attention_fmha": "trtllm-gen-fp16sm",
     "skip_corr_threshold": 0.0,
+    "attention_cudnn_steps": 0,
+    "skip_corr_start_step": 0,
     "fp8_scale_fusion": "qkstatic",
     "fp8_fusion_block_h": 8,
     "fp8_fusion_warps": 2,

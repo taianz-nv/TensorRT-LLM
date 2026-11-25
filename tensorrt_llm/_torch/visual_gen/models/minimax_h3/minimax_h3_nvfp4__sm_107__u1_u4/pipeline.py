@@ -41,6 +41,7 @@ from ..packing import (
 )
 from ..pipeline_minimax_h3 import MiniMaxH3Pipeline
 from .config import SCENARIO
+from .kernels import fused_fp8_qk
 from .kernels.vae_decoder_fp8 import convert_decoder_linears_fp8, set_tiles
 from .modeling import ScenarioTransformer
 
@@ -90,6 +91,57 @@ class MiniMaxH3Nvfp4Sm107U1U4Pipeline(MiniMaxH3Pipeline):
             if SCENARIO.vae_fp8_tiled:
                 set_tiles(mlp=SCENARIO.vae_fp8_tile, q=SCENARIO.resolved_vae_fp8_qtile(ulysses))
             convert_decoder_linears_fp8(self.vae.decoder)
+        self._init_hybrid_attention()
+
+    def _init_hybrid_attention(self) -> None:
+        """Route initial denoising steps to dynamic-scale cuDNN FP8 attention and later steps to
+        ``SCENARIO.attention_fmha`` (with deferred rescale enabled from ``skip_corr_start_step``)."""
+        self._hybrid_step_state: Optional[dict[str, int]] = None
+        cudnn_steps = int(SCENARIO.attention_cudnn_steps)
+        skip_start = int(SCENARIO.skip_corr_start_step)
+        if SCENARIO.attention_fmha == "cudnn" or (cudnn_steps <= 0 and skip_start <= 0):
+            return
+        backends = []
+        for block in self.transformer.transformer_blocks:
+            backend = getattr(block.attn.attn, "inner_backend", block.attn.attn)
+            if getattr(backend, "quant_dtype", None) == "fp8" and hasattr(backend, "fp8_dense_fmha"):
+                backends.append(backend)
+        if not backends:
+            return
+        state = {"step": 0}
+        target_fmha = SCENARIO.attention_fmha
+        target_t = float(SCENARIO.skip_corr_threshold)
+
+        def route(_module, _args, _kwargs):
+            step = state["step"]
+            use_cudnn = step < cudnn_steps
+            fused_fp8_qk.set_dynamic_override(use_cudnn)
+            variant = "cudnn" if use_cudnn else target_fmha
+            skip_t = 0.0 if (use_cudnn or step < skip_start) else target_t
+            for backend in backends:
+                backend.fp8_dense_fmha = variant
+                backend.fp8_skip_corr_threshold = skip_t
+            state["step"] = step + 1
+
+        self.transformer.register_forward_pre_hook(route, with_kwargs=True)
+        self._hybrid_step_state = state
+        logger.info(
+            f"MiniMax-H3 NVFP4 hybrid attention: dynamic cuDNN for steps 0..{cudnn_steps - 1}, "
+            f"{target_fmha} ({SCENARIO.fp8_scale_fusion}) thereafter, "
+            f"skip_corr_threshold={target_t} from step {skip_start} ({len(backends)} backends)"
+        )
+
+    def forward(self, *args, **kwargs):
+        state = getattr(self, "_hybrid_step_state", None)
+        if state is not None:
+            state["step"] = 0
+        fused_fp8_qk.set_dynamic_override(False)
+        try:
+            return super().forward(*args, **kwargs)
+        finally:
+            if state is not None:
+                state["step"] = 0
+            fused_fp8_qk.set_dynamic_override(False)
 
     def _ulysses_size(self) -> int:
         vgm = self.pipeline_config.visual_gen_mapping

@@ -40,9 +40,14 @@ class ScenarioConfig:
     # Fp16Softmax SM107a cubin with the softmax scale folded into the Q / K scales.
     attention_fmha: str = "trtllm-gen-fp16sm"
     # Deferred output rescale threshold t (the kernel skips the O rescale while the running row max
-    # has grown by at most 2^t; E4M3 BMM2 then uses a P scale of 1.75). Bit-identical to 0 at t = 1
-    # on the stack's reference clip; 0 = rescale every step.
+    # has grown by at most 2^t; E4M3 BMM2 then uses a P scale of 1.75). 0 = rescale every step.
     skip_corr_threshold: float = 1.0
+    # First transformer forward (0-based denoising step) that enables ``skip_corr_threshold``;
+    # earlier forwards run with 0.0 for higher early-trajectory fidelity. 0 = all steps.
+    skip_corr_start_step: int = 25
+    # First N transformer forwards of a request run dynamic-scale cuDNN FP8 attention; remaining
+    # forwards run ``attention_fmha`` (with ``fp8_scale_fusion``). 0 = off.
+    attention_cudnn_steps: int = 8
     # Ulysses > 1: the op reads Q / K / V in place from the [S, 3, H / U, D] receive buffer.
     strided_receive: bool = True
     # One packed FP8 all-to-all for Q / K / V at Ulysses > 1, and the attention output exchanged as
@@ -51,9 +56,10 @@ class ScenarioConfig:
     out_a2a_fp4: bool = True
 
     # --- the fused QK-norm + RoPE + FP8 cast producer ---------------------------------------------
-    # "qkstatic": static Q / K scales that fold sm_scale * log2 e (the FP16-softmax kernel runs with a
-    # unit scale), V with its dynamic per-tensor amax; "static" / "dynamic" are the recipe's other modes.
-    fp8_scale_fusion: str = "qkstatic"
+    # "qkasym": dynamic complementary Q / K descales (dk = 32 * s_k, dq = product / dk) folding
+    # sm_scale * log2 e for trtllm-gen-fp16sm while preserving K mantissa precision; "qkstatic"
+    # uses equal static Q / K scales; "static" / "dynamic" are the other supported modes.
+    fp8_scale_fusion: str = "qkasym"
     fp8_static_scales: Optional[str] = None  # a descale table for fp8_scale_fusion="static"
     fp8_static_margin: float = 1.0
     fp8_fusion_split: bool = True  # Q / K and V in separate launches (the recipe's split)
@@ -109,11 +115,20 @@ class ScenarioConfig:
     def validate(self) -> None:
         if self.attention_fmha not in ("cudnn", "trtllm-gen", "trtllm-gen-fp16sm"):
             raise ValueError(f"attention_fmha={self.attention_fmha!r}")
-        if self.attention_fmha == "trtllm-gen-fp16sm" and self.fp8_scale_fusion != "qkstatic":
-            raise ValueError("the FP16-softmax kernel needs fp8_scale_fusion='qkstatic' (the fold)")
+        if self.attention_fmha == "trtllm-gen-fp16sm" and self.fp8_scale_fusion not in (
+            "qkstatic",
+            "qkasym",
+        ):
+            raise ValueError(
+                "the FP16-softmax kernel needs fp8_scale_fusion in ('qkstatic', 'qkasym')"
+            )
+        if self.attention_cudnn_steps < 0:
+            raise ValueError("attention_cudnn_steps must be >= 0")
+        if self.skip_corr_start_step < 0:
+            raise ValueError("skip_corr_start_step must be >= 0")
         if not 0.0 <= self.skip_corr_threshold <= 8.0:
             raise ValueError("skip_corr_threshold must be in [0, 8]")
-        if self.fp8_scale_fusion not in ("qkstatic", "static", "dynamic"):
+        if self.fp8_scale_fusion not in ("qkasym", "qkstatic", "static", "dynamic"):
             raise ValueError(f"fp8_scale_fusion={self.fp8_scale_fusion!r}")
         if self.amax_allreduce not in ("symm", "nccl"):
             raise ValueError(f"amax_allreduce={self.amax_allreduce!r}")

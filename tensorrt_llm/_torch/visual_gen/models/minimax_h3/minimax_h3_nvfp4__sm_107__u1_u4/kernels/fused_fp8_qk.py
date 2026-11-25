@@ -486,6 +486,7 @@ def _qk_norm_rope_fp8_split(
     valid_len=None,
     packed_hl=0,
     qk_static=False,
+    qk_asym=False,
     tensor_major=False,
     rope_halves_equal=False,
 ):
@@ -495,7 +496,7 @@ def _qk_norm_rope_fp8_split(
     # one-plane buffer. Row-major send: one [U, S, 3, HL, D] buffer, plane i of 3.
     planes = 1 if tensor_major else 3
     which = (0, 0, 0) if tensor_major else (0, 1, 2)
-    static = static_descale is not None and not qk_static
+    static = static_descale is not None and not qk_static and not qk_asym
     symm = None
     if not static:
         symm = _symm_amax_state(qkv.device)
@@ -605,6 +606,9 @@ def _qk_norm_rope_fp8_split(
             amax_n, amax_stride = symm.world, 4
         else:
             _reduce_amax(amax)
+        if qk_asym:
+            raw_amax = amax[:, :3].amax(dim=0) if symm is not None else amax[:3]
+            descale = complementary_fp16sm_descales(raw_amax, d)
     for i in range(3):
         if vfold and i == 0:
             continue
@@ -620,7 +624,7 @@ def _qk_norm_rope_fp8_split(
                 sat[i : i + 1] if sat is not None else descale,
                 s,
                 eps,
-                STATIC=static or qk_static,
+                STATIC=static or qk_static or qk_asym,
                 SAT_COUNT=sat is not None,
                 H=h,
                 D=d,
@@ -653,7 +657,7 @@ def _qk_norm_rope_fp8_split(
             eps,
             NORM_ROPE=i < 2,
             OUT_FP8=True,
-            STATIC=static or (qk_static and i < 2),
+            STATIC=static or qk_asym or (qk_static and i < 2),
             SAT_COUNT=sat is not None,
             H=h,
             D=d,
@@ -715,8 +719,11 @@ def _qk_norm_rope_fp8_impl(
         outs = (q8, torch.empty_like(q8), torch.empty_like(q8))
     block_h, num_warps = _launch_config()
     grid = (rows,)
-    qk_static = _MODE == "qkstatic"
-    if qk_static and static_descale is None:
+    dyn_override = _DYNAMIC_OVERRIDE
+    qk_static = _MODE == "qkstatic" and not dyn_override
+    qk_asym = _MODE == "qkasym" and not dyn_override
+    eff_static_descale = None if dyn_override else static_descale
+    if qk_static and eff_static_descale is None:
         raise ValueError("fp8_scale_fusion=qkstatic needs the qk_static_descale table")
     if _split_launch():
         descale, static, sat = _qk_norm_rope_fp8_split(
@@ -725,7 +732,7 @@ def _qk_norm_rope_fp8_impl(
             weight_k,
             cos,
             sin,
-            static_descale,
+            eff_static_descale,
             eps,
             h,
             d,
@@ -737,6 +744,7 @@ def _qk_norm_rope_fp8_impl(
             valid_len,
             packed_hl=hl,
             qk_static=qk_static,
+            qk_asym=qk_asym,
             tensor_major=hl > 0 and RECV_INPLACE,
             rope_halves_equal=rope_halves_equal,
         )
@@ -748,8 +756,8 @@ def _qk_norm_rope_fp8_impl(
             # The packed op returns the whole send buffer (5-D in both layouts), not plane 0.
             outs = (send, send, send)
         return outs, descale
-    if qk_static:
-        raise ValueError("fp8_scale_fusion=qkstatic needs fp8_fusion_split=1")
+    if qk_static or qk_asym:
+        raise ValueError(f"fp8_scale_fusion={_MODE} needs fp8_fusion_split=1")
     if hl > 0 and RECV_INPLACE:
         raise ValueError("RECV_INPLACE=1 needs fp8_fusion_split=1 (per-tensor launches)")
     if static_descale is None:
@@ -1526,18 +1534,52 @@ def _read_fusion_mode() -> str:
         return "static"
     if mode in ("qkstatic", "qk-static"):
         return "qkstatic"
-    raise ValueError(f"fp8_scale_fusion={mode!r}: expected 0, dynamic, static or qkstatic")
+    if mode in ("qkasym", "qk-asym"):
+        return "qkasym"
+    raise ValueError(
+        f"fp8_scale_fusion={mode!r}: expected 0, dynamic, static, qkstatic or qkasym"
+    )
 
 
 # Read once at import so the compiled transformer sees a constant (no environment access in
 # the traced forward).
 _MODE = _read_fusion_mode()
+_DYNAMIC_OVERRIDE: bool = False
+_FP16SM_K_SHIFT_SCALE: float = 32.0
+
+
+def set_dynamic_override(enabled: bool) -> None:
+    """Temporarily force per-tensor dynamic Q/K/V scales (used for early cuDNN steps)."""
+    global _DYNAMIC_OVERRIDE
+    _DYNAMIC_OVERRIDE = bool(enabled)
+
+
+def complementary_fp16sm_descales(
+    raw_amax: torch.Tensor,
+    head_dim: int,
+    *,
+    k_shift_scale: float = _FP16SM_K_SHIFT_SCALE,
+) -> torch.Tensor:
+    """Compute dynamic complementary Q/K descales folding ``sm_scale * log2(e)`` into Q and K.
+
+    Sets ``dk = 32 * s_k`` (exact power-of-two shift preserving K's 3-bit E4M3 mantissa grid)
+    and ``dq = product / dk`` with a lower clamp keeping ``max|Q/dq| >= 0.125`` against tiny-K
+    query underflow.
+    """
+    dyn = (raw_amax.float() / 448.0).clamp_min(1.0 / (448.0 * 512.0))
+    product = 1.0 / ((head_dim**-0.5) * math.log2(math.e))
+    s_q = dyn[0]
+    s_k = dyn[1]
+    s_v = dyn[2].bfloat16().float()
+    dk_lo = (product / (3584.0 * s_q)).clamp(min=1e-4)
+    dk_hi = (product / s_q).clamp(min=dk_lo, max=product * 1e4)
+    dk = (k_shift_scale * s_k).clamp(min=dk_lo, max=dk_hi)
+    dq = product / dk
+    return torch.stack([dq, dk, s_v])
 
 
 def fusion_mode() -> str:
-    """``off`` | ``dynamic`` | ``static`` | ``qkstatic`` from ``fp8_scale_fusion`` (read at
-    import from the frozen process config). ``qkstatic``: Q and K take the fixed descale of
-    :func:`qk_static_descale` (the softmax scale folded into the codes); V keeps its dynamic per-tensor amax."""
+    """``off`` | ``dynamic`` | ``static`` | ``qkstatic`` | ``qkasym`` from ``fp8_scale_fusion``."""
     return _MODE
 
 
